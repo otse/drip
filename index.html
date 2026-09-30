@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <title>Matrix Rain — foreignObject + Pixelated</title>
+  <link rel="stylesheet" href="dev-column.css">
+  <style>
+    html,
+    body {
+      margin: 0;
+      height: 100%;
+      background: #000;
+      overflow: hidden;
+    }
+
+    #output {
+      display: block;
+      image-rendering: pixelated;
+      transform: perspective(800px) scale(1.5) rotateX(30deg);
+    }
+  </style>
+</head>
+
+<body>
+  <canvas id="output"></canvas>
+  <div id="devColumn" class="dev-column"></div>
+
+  <script>
+    let W = window.innerWidth;
+    let H = window.innerHeight;
+
+    const PIXEL_SIZE = 3; // block size of the final pixelation
+    const FALL_SPEED_SCALE = 3; // higher = slower; multiplies frames-per-row-step
+    const STATIC_GLYPHS = true; // true = a trail's characters stay fixed as it falls, only rerolled on reset
+
+    const devColumnEl = document.getElementById("devColumn");
+    let CHAR_W;
+    let LINE_H;
+    let columnCount;
+
+    function getLineHeight(el) {
+      return parseFloat(getComputedStyle(el).lineHeight) || parseFloat(getComputedStyle(el).fontSize) * 1.2;
+    }
+
+    const chars = "アイウエオカキクケコサシスセソ0123456789";
+    const ROWS_PER_TRAIL = 20;
+
+    function randomChar() {
+      return chars[Math.floor(Math.random() * chars.length)];
+    }
+
+    function randomGlyphBlock(rows) {
+      let text = "";
+      for (let i = 0; i < rows; i++) text += randomChar() + "\n";
+      return text;
+    }
+
+    // one falling glyph stream; advances a full text row at a time instead of a pixel crawl,
+    // with its own randomized cadence so columns don't all step in lockstep
+    class Column {
+      constructor(height) {
+        this.reset(height);
+      }
+      reset(height) {
+        this.y = Math.floor(Math.random() * -height);
+        this.frame = 0;
+        this.interval = (2 + Math.floor(Math.random() * 5)) * FALL_SPEED_SCALE; // frames per row step
+        this.glyphs = randomGlyphBlock(ROWS_PER_TRAIL);
+      }
+      step(height, lineHeight) {
+        if (++this.frame < this.interval) return;
+        this.frame = 0;
+        this.y += lineHeight;
+        if (!STATIC_GLYPHS) this.glyphs = randomGlyphBlock(ROWS_PER_TRAIL); // reroll only when the row actually advances
+        if (this.y > height) this.reset(height);
+      }
+    }
+
+    const columns = [];
+
+    function updateColumnLayout() {
+      CHAR_W = parseFloat(getComputedStyle(devColumnEl).width);
+      LINE_H = getLineHeight(devColumnEl);
+      columnCount = Math.ceil(W / CHAR_W);
+      while (columns.length < columnCount) columns.push(new Column(H));
+      columns.length = columnCount;
+    }
+    updateColumnLayout();
+
+    // fills a single standalone column with enough glyphs to span top to bottom
+    function fillDevColumn() {
+      const count = Math.ceil(window.innerHeight / getLineHeight(devColumnEl)) + 2;
+      let text = "";
+      for (let i = 0; i < count; i++) text += randomChar() + "\n";
+      devColumnEl.textContent = text;
+    }
+    fillDevColumn();
+    window.addEventListener("resize", () => {
+      fillDevColumn();
+      W = window.innerWidth;
+      H = window.innerHeight;
+      off.width = Math.ceil(W / PIXEL_SIZE);
+      off.height = Math.ceil(H / PIXEL_SIZE);
+      out.width = W;
+      out.height = H;
+      outCtx.imageSmoothingEnabled = false; // resizing a canvas resets its context state
+    });
+
+    // styles must be inlined: foreignObject content is rendered in an isolated document
+    // with no access to the host page's <style> rules, so pull the live values from
+    // dev-column.css (via #devColumn's computed style) instead of hardcoding them.
+    // Properties are read straight off the .dev-column stylesheet rule, so anything
+    // added/removed there is picked up automatically - no key list to maintain.
+    // Layout props are excluded since each rain column positions itself.
+    const GLYPH_STYLE_EXCLUDE = new Set(["position", "top", "left", "width", "height", "z-index"]);
+
+    function findDevColumnRule() {
+      for (const sheet of document.styleSheets) {
+        let rules;
+        try {
+          rules = sheet.cssRules;
+        } catch {
+          continue; // cross-origin stylesheet, can't inspect its rules
+        }
+        for (const rule of rules) {
+          if (rule.selectorText === ".dev-column") return rule;
+        }
+      }
+      return null;
+    }
+
+    const devColumnRule = findDevColumnRule();
+
+    // recomputing the style string is pointless unless the rule's CSS actually changed,
+    // so skip the getComputedStyle/filter/map/join work when cssText matches last frame
+    let cachedCssText = null;
+    let cachedColumnStyle = "";
+
+    function readColumnStyle() {
+      const cssText = devColumnRule ? devColumnRule.style.cssText : "";
+      if (cssText === cachedCssText) return cachedColumnStyle;
+      cachedCssText = cssText;
+
+      const cs = getComputedStyle(devColumnEl);
+      const props = devColumnRule ? Array.from(devColumnRule.style) : [];
+      cachedColumnStyle = props
+        .filter((prop) => !GLYPH_STYLE_EXCLUDE.has(prop))
+        .map((prop) => `${prop}:${cs.getPropertyValue(prop)};`)
+        .join(" ");
+      return cachedColumnStyle;
+    }
+
+    function buildRainHTML() {
+      const glyphStyle = escapeAttr(readColumnStyle());
+      let cols = "";
+      for (let i = 0; i < columnCount; i++) {
+        const column = columns[i];
+        cols += `<div style="position:absolute; top:${column.y}px; left:${i * CHAR_W}px; width:${CHAR_W}px; ${glyphStyle}">${column.glyphs}</div>`;
+      }
+      return `<div xmlns="http://www.w3.org/1999/xhtml" style="width:100%; height:100%; background:#000;">${cols}</div>`;
+    }
+
+    function stepColumns() {
+      for (const column of columns) column.step(H, LINE_H);
+    }
+
+    // CSS values (e.g. a quoted font-family stack) can contain " which would break
+    // the style="..." attribute in the generated SVG/XML, so escape before inlining
+    function escapeAttr(str) {
+      return str.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+
+    // one Image/handlers reused for every frame instead of allocating a fresh
+    // Image + Blob + object URL + promise per frame, which is what was piling up
+    // garbage fast enough to slow the page down over time. The previous frame's
+    // object URL is revoked as soon as the new one is created, so at most one
+    // blob is ever alive.
+    const rainImg = new Image();
+    let rainImgUrl = null;
+
+    function domToImage(html, w, h) {
+      const svg = `
+    <svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}">
+      <foreignObject width="100%" height="100%">
+        ${html}
+      </foreignObject>
+    </svg>`;
+      const blob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
+      const previousUrl = rainImgUrl;
+      rainImgUrl = URL.createObjectURL(blob);
+      return new Promise((resolve, reject) => {
+        const releasePreviousUrl = () => {
+          if (previousUrl) URL.revokeObjectURL(previousUrl);
+        };
+        rainImg.onload = () => {
+          releasePreviousUrl();
+          resolve(rainImg);
+        };
+        rainImg.onerror = () => {
+          releasePreviousUrl();
+          reject(new Error("Malformed SVG frame"));
+        };
+        rainImg.src = rainImgUrl;
+      });
+    }
+
+    const off = document.createElement("canvas");
+    off.width = Math.ceil(W / PIXEL_SIZE);
+    off.height = Math.ceil(H / PIXEL_SIZE);
+    const offCtx = off.getContext("2d");
+
+    const out = document.getElementById("output");
+    out.width = W;
+    out.height = H;
+    const outCtx = out.getContext("2d");
+    outCtx.imageSmoothingEnabled = false;
+
+    async function renderFrame() {
+      updateColumnLayout();
+      stepColumns();
+      const html = buildRainHTML();
+      try {
+        const img = await domToImage(html, W, H);
+        offCtx.clearRect(0, 0, off.width, off.height);
+        offCtx.drawImage(img, 0, 0, off.width, off.height);
+
+        outCtx.clearRect(0, 0, W, H);
+        outCtx.drawImage(off, 0, 0, off.width, off.height, 0, 0, W, H);
+      } catch (err) {
+        console.warn("Skipping malformed frame", err); // e.g. mid-edit CSS value
+      }
+
+      requestAnimationFrame(renderFrame);
+    }
+
+    renderFrame();
+  </script>
+</body>
+
+</html>
