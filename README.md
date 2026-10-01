@@ -4,6 +4,8 @@
 
 A small, dependency-free browser experiment that renders animated Matrix-style rain with HTML glyphs inside an SVG `foreignObject`, then draws each frame to a low-resolution canvas and scales it up with pixelated rendering.
 
+### I designed it to look good at 50% brightness
+
 ## Run
 
 This requires a local web server; opening `index.html` directly from disk (`file://`) will not work correctly in most browsers due to security restrictions on the `foreignObject` rasterization technique used here. For this you can `serve` the root.
@@ -19,6 +21,8 @@ A few constants near the top of the `<script>` block in [`index.html`](index.htm
 - `ROWS_PER_TRAIL` — number of rows in each falling trail
 
 ## Real-time CSS editing
+
+(Note: By default, .dev-column is hidden using a left -60px; if you want to see it, toggle it or put it at 0.)
 
 The rain's glyph appearance is controlled by [`dev-column.css`](dev-column.css). Edit the `.dev-column` rule in your browser's DevTools to change properties such as font, size, color, and line height. The animation reads the rule's current computed styles and applies them to the glyph columns on every frame, so CSS changes appear in real time without restarting the page.
 

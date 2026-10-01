@@ -17,7 +17,10 @@
     #output {
       display: block;
       image-rendering: pixelated;
-      transform: perspective(1024px) scale(2) rotateX(0deg) rotateY(-30deg);
+      transform: perspective(1024px) scale(2) rotateX(10deg) rotateY(-30deg);
+      filter: contrast(1.15) saturate(5) saturate(0.5) brightness(2);
+      background: #000;
+      box-shadow: inset 0 0 24px rgba(0, 255, 128, 0.15);
       /* filter: url(#bloomm) url(#fisheye) url(#inner-gloww); */
     }
   </style>
@@ -31,11 +34,14 @@
     let W = window.innerWidth;
     let H = window.innerHeight;
 
-    const PIXEL_SIZE = 3; // block size of the final pixelation
-    const FALL_SPEED_SCALE = 0.5; // higher = slower; multiplies frames-per-row-step
+    const PIXEL_SIZE = 2; // block size of the final pixelation
+    const FALL_SPEED_SCALE = 0.5; // base multiplier; each column gets its own speed spread around this
+    const SPEED_VARIANCE = 2.0; // higher = bigger difference between slow and fast columns
     const STATIC_GLYPHS = false; // true = a trail's characters stay fixed as it falls, only rerolled on reset
     const GLYPH_REROLL_CHANCE = 0.15; // fraction of characters rerolled on each row step (ignored when STATIC_GLYPHS is true)
-    const PORTAL_CHANCE = 0.5; // chance a trail becomes a "portal" trail: its head freezes in place once it reaches a random point on screen
+    const PORTAL_CHANCE = 0.5; // chance a trail becomes a "portal" trail
+    const PORTAL_LOCK_OFFSET_MIN = 0.35; // begins around the middle of the visible screen
+    const PORTAL_LOCK_OFFSET_MAX = 0.65; // ends around the middle of the visible screen
     const PORTAL_FADE_STEP = 0.08; // opacity lost per row-step once the head starts fading out
 
     const devColumnEl = document.getElementById("devColumn");
@@ -111,12 +117,13 @@
       reset(height) {
         this.y = Math.floor(Math.random() * -height);
         this.frame = 0;
-        this.interval = (2 + Math.floor(Math.random() * 5)) * FALL_SPEED_SCALE; // frames per row step
+        const slowFactor = 0.5 + Math.random() * SPEED_VARIANCE;
+        this.interval = (2 + Math.floor(Math.random() * 5)) * FALL_SPEED_SCALE * slowFactor; // slow and fast columns drift apart here
         this.glyphs = randomGlyphBlock(ROWS_PER_TRAIL);
         this.dynamicMask = randomMask(ROWS_PER_TRAIL, GLYPH_REROLL_CHANCE); // which rows keep rerolling vs. staying fixed for this trail's lifetime
         this.isPortal = Math.random() < PORTAL_CHANCE; // this trail's head will freeze once it reaches portalLockY
         this.portalLocked = false;
-        this.portalLockY = this.isPortal ? Math.random() * height : 0;
+        this.portalLockY = this.isPortal ? this.y + height * (PORTAL_LOCK_OFFSET_MIN + Math.random() * (PORTAL_LOCK_OFFSET_MAX - PORTAL_LOCK_OFFSET_MIN)) : 0;
         this.portalFading = false; // true once the trail is fully consumed and the head itself starts fading
         this.portalFade = 1; // head opacity; only drops below 1 while portalFading
       }
@@ -224,8 +231,8 @@
     // with an explicit color instead of a CSS gradient/background-clip fade
     // ordered from the lowest/leading row upward; rows beyond this length darken further via darkenGreen()
     const TAIL_COLORS = ["#ffffff", "#ccffcc", "#99ff99", "#66ff66", "#33ff33"];
-    const DARKEN_STEP = 40; // green channel reduction per row above the tail colors
-    const MIN_GREEN = 0x40; // floor so higher (older) characters stay faintly visible
+    const DARKEN_STEP = 80; // green channel reduction per row above the tail colors
+    const MIN_GREEN = 0x30; // floor so higher (older) characters stay faintly visible
 
     // rows above the tail-color range (i.e. further from the leading edge) get
     // progressively darker green, computed per-character rather than via a CSS gradient
@@ -317,6 +324,30 @@
     const outCtx = out.getContext("2d");
     outCtx.imageSmoothingEnabled = false;
 
+    function applyCRT(outCtx, w, h) {
+      const scanlineAlpha = 0.1;
+      outCtx.save();
+      outCtx.globalCompositeOperation = "source-atop";
+      for (let y = 0; y < h; y += 4) {
+        outCtx.fillStyle = `rgba(255,255,255,${scanlineAlpha})`;
+        outCtx.fillRect(0, y, w, 1);
+      }
+      outCtx.restore();
+
+      const vignette = outCtx.createRadialGradient(
+        w / 2,
+        h / 2,
+        Math.min(w, h) * 0.2,
+        w / 2,
+        h / 2,
+        Math.max(w, h) * 0.8
+      );
+      vignette.addColorStop(0, "rgba(0,0,0,0)");
+      vignette.addColorStop(1, "rgba(0,0,0,0.1)");
+      outCtx.fillStyle = vignette;
+      outCtx.fillRect(0, 0, w, h);
+    }
+
     async function renderFrame() {
       updateColumnLayout();
       stepColumns();
@@ -334,6 +365,8 @@
         outCtx.fillStyle = "#000";
         outCtx.fillRect(0, 0, W, H);
         outCtx.globalCompositeOperation = "source-over";
+
+        applyCRT(outCtx, W, H);
       } catch (err) {
         console.warn("Skipping malformed frame", err); // e.g. mid-edit CSS value
       }
