@@ -10,14 +10,15 @@
     body {
       margin: 0;
       height: 100%;
-      background: #000;
+      background: #242424;
       overflow: hidden;
     }
 
     #output {
       display: block;
       image-rendering: pixelated;
-      transform: perspective(800px) scale(1.5) rotateX(30deg);
+      transform: perspective(1024px) scale(2) rotateX(0deg) rotateY(-30deg);
+      /* filter: url(#bloomm) url(#fisheye) url(#inner-gloww); */
     }
   </style>
 </head>
@@ -31,19 +32,26 @@
     let H = window.innerHeight;
 
     const PIXEL_SIZE = 3; // block size of the final pixelation
-    const FALL_SPEED_SCALE = 3; // higher = slower; multiplies frames-per-row-step
-    const STATIC_GLYPHS = true; // true = a trail's characters stay fixed as it falls, only rerolled on reset
+    const FALL_SPEED_SCALE = 0.5; // higher = slower; multiplies frames-per-row-step
+    const STATIC_GLYPHS = false; // true = a trail's characters stay fixed as it falls, only rerolled on reset
+    const GLYPH_REROLL_CHANCE = 0.15; // fraction of characters rerolled on each row step (ignored when STATIC_GLYPHS is true)
+    const PORTAL_CHANCE = 0.5; // chance a trail becomes a "portal" trail: its head freezes in place once it reaches a random point on screen
+    const PORTAL_FADE_STEP = 0.08; // opacity lost per row-step once the head starts fading out
 
     const devColumnEl = document.getElementById("devColumn");
     let CHAR_W;
     let LINE_H;
     let columnCount;
 
+    const MIN_LINE_HEIGHT = 4; // px floor so a tiny/zero live-edited font-size can't blow up glyph-count loops below
+
     function getLineHeight(el) {
-      return parseFloat(getComputedStyle(el).lineHeight) || parseFloat(getComputedStyle(el).fontSize) * 1.2;
+      const lh = parseFloat(getComputedStyle(el).lineHeight) || parseFloat(getComputedStyle(el).fontSize) * 1.2;
+      // guard against zero/NaN/too-small line-height, which would make the glyph-block loops below huge or infinite
+      return lh >= MIN_LINE_HEIGHT ? lh : MIN_LINE_HEIGHT;
     }
 
-    const chars = "アイウエオカキクケコサシスセソ0123456789";
+    const chars = "アイウエオカキクケコサシスセソ0";
     const ROWS_PER_TRAIL = 20;
 
     function randomChar() {
@@ -54,6 +62,44 @@
       let text = "";
       for (let i = 0; i < rows; i++) text += randomChar() + "\n";
       return text;
+    }
+
+    // rerolls only the rows flagged as "dynamic", so rows flagged "static" keep the
+    // same character for the whole lifetime of the trail instead of being re-randomized
+    // (and possibly re-picking a static row) on every step
+    function partialRerollGlyphBlock(glyphs, dynamicMask) {
+      const rows = glyphs.split("\n");
+      for (let i = 0; i < rows.length; i++) {
+        if (rows[i] && dynamicMask[i]) rows[i] = randomChar();
+      }
+      return rows.join("\n");
+    }
+
+    function randomMask(rows, dynamicChance) {
+      const mask = new Array(rows);
+      for (let i = 0; i < rows; i++) mask[i] = Math.random() < dynamicChance;
+      return mask;
+    }
+
+    // while a column is "locked" into a portal, its head (last row) stays fixed in place;
+    // the trailing rows above it keep rolling/rerolling downward, shifting toward the head by
+    // one row each tick, and the row that reaches the head is consumed and disappears. The total
+    // row count never changes (a blank row backfills the top instead of a fresh glyph), so the
+    // head's index - and therefore its rendered pixel position - stays fixed the whole time.
+    function shiftPortalRows(glyphs) {
+      const rows = glyphs.split("\n");
+      let lastRow = rows.length - 1;
+      while (lastRow > 0 && !rows[lastRow]) lastRow--;
+      const head = rows[lastRow];
+      const trailing = rows.slice(0, lastRow);
+      trailing.pop(); // row closest to the head is absorbed into the portal and disappears for good
+      if (!STATIC_GLYPHS) {
+        for (let i = 0; i < trailing.length; i++) {
+          if (trailing[i] && Math.random() < GLYPH_REROLL_CHANCE) trailing[i] = randomChar(); // never conjure a glyph into an already-blank slot
+        }
+      }
+      trailing.unshift(""); // nothing new enters - a blank row grows in from the top instead
+      return [...trailing, head].join("\n");
     }
 
     // one falling glyph stream; advances a full text row at a time instead of a pixel crawl,
@@ -67,12 +113,31 @@
         this.frame = 0;
         this.interval = (2 + Math.floor(Math.random() * 5)) * FALL_SPEED_SCALE; // frames per row step
         this.glyphs = randomGlyphBlock(ROWS_PER_TRAIL);
+        this.dynamicMask = randomMask(ROWS_PER_TRAIL, GLYPH_REROLL_CHANCE); // which rows keep rerolling vs. staying fixed for this trail's lifetime
+        this.isPortal = Math.random() < PORTAL_CHANCE; // this trail's head will freeze once it reaches portalLockY
+        this.portalLocked = false;
+        this.portalLockY = this.isPortal ? Math.random() * height : 0;
+        this.portalFading = false; // true once the trail is fully consumed and the head itself starts fading
+        this.portalFade = 1; // head opacity; only drops below 1 while portalFading
       }
       step(height, lineHeight) {
+        if (this.portalLocked) {
+          if (++this.frame < this.interval) return;
+          this.frame = 0;
+          if (this.portalFading) {
+            this.portalFade -= PORTAL_FADE_STEP;
+            if (this.portalFade <= 0) this.reset(height);
+            return;
+          }
+          this.glyphs = shiftPortalRows(this.glyphs);
+          if (this.glyphs.split("\n").filter(Boolean).length <= 1) this.portalFading = true; // whole trail has fallen into the head - fade it out instead of vanishing instantly
+          return;
+        }
         if (++this.frame < this.interval) return;
         this.frame = 0;
         this.y += lineHeight;
-        if (!STATIC_GLYPHS) this.glyphs = randomGlyphBlock(ROWS_PER_TRAIL); // reroll only when the row actually advances
+        if (!STATIC_GLYPHS) this.glyphs = partialRerollGlyphBlock(this.glyphs, this.dynamicMask);
+        if (this.isPortal && this.y >= this.portalLockY) this.portalLocked = true; // head position is now frozen at this.y
         if (this.y > height) this.reset(height);
       }
     }
@@ -81,6 +146,9 @@
 
     function updateColumnLayout() {
       CHAR_W = parseFloat(getComputedStyle(devColumnEl).width);
+      // guard against zero/negative/NaN widths (e.g. live-edited dev-column CSS)
+      // which would make columnCount infinite and freeze the page in the while loop below
+      if (!(CHAR_W > 0)) CHAR_W = 1;
       LINE_H = getLineHeight(devColumnEl);
       columnCount = Math.ceil(W / CHAR_W);
       while (columns.length < columnCount) columns.push(new Column(H));
@@ -134,21 +202,54 @@
 
     // recomputing the style string is pointless unless the rule's CSS actually changed,
     // so skip the getComputedStyle/filter/map/join work when cssText matches last frame
-    let cachedCssText = null;
     let cachedColumnStyle = "";
 
     function readColumnStyle() {
-      const cssText = devColumnRule ? devColumnRule.style.cssText : "";
-      if (cssText === cachedCssText) return cachedColumnStyle;
-      cachedCssText = cssText;
-
       const cs = getComputedStyle(devColumnEl);
       const props = devColumnRule ? Array.from(devColumnRule.style) : [];
-      cachedColumnStyle = props
+      // cache key is the actual computed values we're about to render, not the
+      // stylesheet rule's own cssText - the rule's cssText only changes when that
+      // specific rule is edited, but getComputedStyle can change for other reasons
+      // (e.g. an inline style / DevTools "Computed" panel edit on the element itself),
+      // which would otherwise leave this serving a stale (and silently out-of-sync) style
+      const style = props
         .filter((prop) => !GLYPH_STYLE_EXCLUDE.has(prop))
         .map((prop) => `${prop}:${cs.getPropertyValue(prop)};`)
         .join(" ");
+      cachedColumnStyle = style;
       return cachedColumnStyle;
+    }
+
+    // the lowest (last) row of a trail is its leading edge - highlight it per-character
+    // with an explicit color instead of a CSS gradient/background-clip fade
+    // ordered from the lowest/leading row upward; rows beyond this length darken further via darkenGreen()
+    const TAIL_COLORS = ["#ffffff", "#ccffcc", "#99ff99", "#66ff66", "#33ff33"];
+    const DARKEN_STEP = 40; // green channel reduction per row above the tail colors
+    const MIN_GREEN = 0x40; // floor so higher (older) characters stay faintly visible
+
+    // rows above the tail-color range (i.e. further from the leading edge) get
+    // progressively darker green, computed per-character rather than via a CSS gradient
+    function darkenGreen(rowsAboveTail) {
+      const green = Math.max(MIN_GREEN, 0xff - rowsAboveTail * DARKEN_STEP);
+      return `#00${green.toString(16).padStart(2, "0")}00`;
+    }
+
+    function glyphBlockToHTML(glyphs, headFade = 1) {
+      const rows = glyphs.split("\n");
+      let lastRow = rows.length - 1;
+      while (lastRow > 0 && !rows[lastRow]) lastRow--; // skip trailing empty row from the final "\n"
+      let html = "";
+      for (let i = 0; i <= lastRow; i++) {
+        if (!rows[i]) {
+          html += "\n"; // blank row (e.g. consumed by a portal) - keep its line height, draw nothing
+          continue;
+        }
+        const colorIndex = lastRow - i;
+        const color = colorIndex < TAIL_COLORS.length ? TAIL_COLORS[colorIndex] : darkenGreen(colorIndex - TAIL_COLORS.length);
+        const opacityStyle = i === lastRow && headFade < 1 ? ` opacity:${headFade};` : ""; // fades the head out once its portal trail is fully consumed
+        html += `<span style="color:${color};${opacityStyle}">${rows[i]}</span>\n`;
+      }
+      return html;
     }
 
     function buildRainHTML() {
@@ -156,9 +257,9 @@
       let cols = "";
       for (let i = 0; i < columnCount; i++) {
         const column = columns[i];
-        cols += `<div style="position:absolute; top:${column.y}px; left:${i * CHAR_W}px; width:${CHAR_W}px; ${glyphStyle}">${column.glyphs}</div>`;
+        cols += `<div style="position:absolute; top:${column.y}px; left:${i * CHAR_W}px; width:${CHAR_W}px; ${glyphStyle}">${glyphBlockToHTML(column.glyphs, column.portalFade)}</div>`;
       }
-      return `<div xmlns="http://www.w3.org/1999/xhtml" style="width:100%; height:100%; background:#000;">${cols}</div>`;
+      return `<div xmlns="http://www.w3.org/1999/xhtml" style="width:100%; height:100%;">${cols}</div>`;
     }
 
     function stepColumns() {
@@ -227,6 +328,12 @@
 
         outCtx.clearRect(0, 0, W, H);
         outCtx.drawImage(off, 0, 0, off.width, off.height, 0, 0, W, H);
+
+        // paint behind whatever the rain drew, so transparent/glyph-free areas show this color
+        outCtx.globalCompositeOperation = "destination-over";
+        outCtx.fillStyle = "#000";
+        outCtx.fillRect(0, 0, W, H);
+        outCtx.globalCompositeOperation = "source-over";
       } catch (err) {
         console.warn("Skipping malformed frame", err); // e.g. mid-edit CSS value
       }
@@ -236,6 +343,7 @@
 
     renderFrame();
   </script>
+
 </body>
 
 </html>
